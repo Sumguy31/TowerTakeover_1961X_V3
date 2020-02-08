@@ -35,7 +35,7 @@
 	bool left; 
 
 	//arclenth measured in inches of the full arc
-	float iArcLengthFull = 69.5;
+	float iArcLengthFull = 65;
 
 	//Navigation
 	int targetDistanceSmart;
@@ -45,7 +45,7 @@
 	int maxVoltSmart = 12000;
 	int minVoltSmart = 6000;
 
-	enum eDriveState {Turning, Moving, Waiting} driveState;
+	enum eDriveState {Waiting, Turning, Moving, Pivoting} driveState;
 	enum eArmPosition {Bottom, Low, Med} armPosition;
 /**
  * A callback function for LLEMU's center button.
@@ -218,8 +218,8 @@ int getHeading(){
 //Set all drive motors to zero[0]
 void stopDrive(){
 	driveLeftFront.move_voltage(0);
-	driveLeftBack.move_voltage(0);
 	driveRightBack.move_voltage(0);
+	driveLeftBack.move_voltage(0);
 	driveRightFront.move_voltage(0);
 }
 /**sets voltage of right side drive
@@ -378,7 +378,7 @@ int iHeadingPID(float target){
 }
 PID sTurnPID;
 int iTurnPID(float target){
-	sTurnPID.kP = 800;
+	sTurnPID.kP = 850;
 	sTurnPID.kI = 0;
 	sTurnPID.kD = 7000;
 
@@ -464,27 +464,38 @@ void turn(float inches, int speed){
 void moveSmartAuto(void*x){
 	int forward, turn;
 	int Pleft, Pright;
-	while(true){
+	zeroDriveEncoder();
+	setBrakeHold();
+	while(pros::competition::is_autonomous()){
 		if(driveState == Turning){
-			turn = iTurnPID(targetHeadingSmart);//MAY NEED FIXING
+			turn = iTurnPID(targetHeadingSmart);
 			turn = capNum(turn, maxVoltSmart, -maxVoltSmart);
 			turn = floorNum(turn, minVoltSmart);
 			setLeftDriveV(-turn);
 			setRightDriveV(+turn);
 		}else if(driveState == Moving){
 			forward = iMovePid(targetDistanceSmart);
-			turn = iHeadingPID(targetHeadingSmart);
+			turn = 0;//HeadingPID(targetHeadingSmart);
 
 			Pleft = floorNum( iLeftPID(leftTarget), minVoltSmart ) ;
 			Pright = floorNum(iRightPID(rightTarget), minVoltSmart );
 
-			setLeftDriveV(capNum(Pleft, maxVoltSmart, -maxVoltSmart) - turn);
-			setRightDriveV(capNum(Pright, maxVoltSmart, -maxVoltSmart) + turn);
-			pros::lcd::print(1, "Left: %i, Right %i, ", Pleft, Pright);
+			Pleft =capNum(Pleft, maxVoltSmart, -maxVoltSmart) -turn;
+			Pright = capNum(Pright, maxVoltSmart, -maxVoltSmart) +turn;
+
+			setLeftDriveV(Pleft);
+			setRightDriveV(Pright);
+		}else if(driveState == Pivoting){
+			Pleft = floorNum( iLeftPID(leftTarget), minVoltSmart);
+			Pright = floorNum(iRightPID(rightTarget), minVoltSmart );
+
+			Pleft =capNum(Pleft, maxVoltSmart, -maxVoltSmart);
+			Pright = capNum(Pright, maxVoltSmart, -maxVoltSmart);
+
+			setLeftDriveV(Pleft);
+			setRightDriveV(Pright);
 		}else if(driveState == Waiting){
 			stopDrive();
-		}else{
-			return;//should never enter this... will edit to throw error later.
 		}
 		pros::delay(20);
 	}
@@ -495,7 +506,6 @@ void moveSmartAuto(void*x){
  * Voltage from 0 to 12000
  */
 void setMoveTarget( float distance, int heading, int maxVolt){
-	zeroDriveEncoder();
 	driveState = Moving;
 	leftTarget = getLeftEncoder() + inchesToDegrees(distance);
 	rightTarget = getRightEncoder() + inchesToDegrees(distance);
@@ -508,15 +518,28 @@ void setMoveTarget( float distance, int heading, int maxVolt){
  * 
  */
 void setTurnTarget( float arcmeasure, int maxVolt){
-	zeroDriveEncoder();
 	driveState = Turning;
 	targetHeadingSmart = arcmeasure;
 	maxVoltSmart = maxVolt;
 }
+/**Sets next pivot target
+ * Distance is in inches around the turn
+ * Voltage from 0 to 12000
+ * Right is true, Left is false
+ */
+void setPivotTarget(float inches, int maxVolt, bool sideRight){
+	driveState = Pivoting;
+	maxVoltSmart = maxVolt;
+	if(sideRight){
+		rightTarget = getRightEncoder() + inchesToDegrees(inches);
+	}else{
+		leftTarget = getLeftEncoder() + inchesToDegrees(inches);
+	}
+}
 //waits for drive to reach destination
 void waitForDrive(){
 	float maxLinError = inchesToDegrees(0.25);//0.25 is max error in inches
-	float maxRotError = arcmeasureToDegrees(5);//5 degrees is max error
+	float maxRotError = arcmeasureToDegrees(1);//5 degrees is max error
 	int minVel = 25;
 	int i = 0;
 	
@@ -532,9 +555,14 @@ void waitForDrive(){
 			i += 20;
 			safety = (i > 500 && (abs(driveRightBack.get_actual_velocity()) < minVel || abs(driveLeftBack.get_actual_velocity()) < minVel));	
 		}
-	}else{
-		return;
+	}else if(driveState == Pivoting){
+		while((abs(getLeftEncoder() - leftTarget) > maxLinError || abs(getRightEncoder() - rightTarget)) && !safety){
+			pros::delay(20);
+			i += 20;
+			safety = (i > 500 && (abs(driveRightBack.get_actual_velocity()) < minVel && abs(driveLeftBack.get_actual_velocity()) < minVel));
+		}
 	}
+	safety = false;
 	driveState = Waiting;
 }
 /**set intake using a voltage from -12000 to 12000
@@ -609,7 +637,7 @@ void moveTilt(int target, int voltage){
 	int difference = abs(current - target);
 	while(difference > error && !safety){
 		difference = abs( tilt.get_position() - target);
-		pros::delay(5);
+		pros::delay(10);
 	}
 
 	tilt.move_voltage(0);
@@ -634,20 +662,124 @@ void centerCube(){
  */
 void deploy(){
 	setIntake(-12000);
-	moveArm(dArmMed, 12000);
-	pros::delay(200);
-	moveArm(0, 9000);
+	moveArm(dArmLow, 12000);
+	moveArm(0, 12000);
 }
 //LCD program for autonomous
 void LCDAuto(void*x){
 	pros::lcd::initialize();
-	while(true){
-		pros::delay(20);
+	while(pros::competition::is_autonomous()){
+		pros::delay(50);
 		pros::lcd::print(4, "Target: %i", leftTarget);
 		pros::lcd::print(5, "Encoder: %f", getLeftEncoder());
-		pros::lcd::print(6, "Time: %i", iTimeCount  );
-		pros::lcd::print(7, "Arm Height: %f", arm.get_position());
+		pros::lcd::print(6, "Time: %i", iTimeCount);
+		pros::lcd::print(7, "Heading: %i", getHeading());
 	}
+}
+/**
+ */
+void blueShortSix(){
+	deploy();
+	setIntake(12000);
+	setArm(-1000);
+
+	minVoltSmart = 4000;
+	setMoveTarget(45, 0, 4500);
+	waitForDrive();
+	pros::delay(500);
+
+	
+	setMoveTarget(-50,0,8000);
+	waitForDrive();
+
+	setMoveTarget(-10, 0, 4000);
+	intake_1.set_brake_mode(pros::E_MOTOR_BRAKE_HOLD);
+	intake_2.set_brake_mode(pros::E_MOTOR_BRAKE_HOLD);
+	pros::delay(200);
+
+	setMoveTarget(2, 0, 6000);
+	waitForDrive();
+
+	setPivotTarget(36, 12000,true);
+	waitForDrive();
+	centerCube();
+
+	moveTilt(tiltHalf, 12000);
+	intake_1.set_brake_mode(pros::E_MOTOR_BRAKE_COAST);
+	intake_2.set_brake_mode(pros::E_MOTOR_BRAKE_COAST);			
+	moveTilt(5900,5000);
+	setIntake(-12000);
+
+	setMoveTarget(-12, 0, 8000);
+	waitForDrive();
+}
+void redShortSix(){
+
+}
+void blueShortNine(){
+
+}
+void redShortNine(){
+	setMoveTarget(-10,0,6000);
+	deploy();//unfolds robot WORKS
+	setIntake(12000);//Turns on Intake WORKS
+	setArm(-1000);// Powers Arm WORKS
+
+	pros::delay(200);
+	minVoltSmart = 4000;
+	setMoveTarget(34, 0, 4500);//Drives Robot Forward WORKS
+	waitForDrive();
+	moveArm(115,12000);
+	setMoveTarget(9, 0, 6000);
+	waitForDrive();
+	pros::delay(300);
+	moveArm(0,8000);
+	pros::delay(100);
+	setArm(-1000);
+
+	minVoltSmart = 6000;
+	setTurnTarget(38, 10000);
+	waitForDrive();
+
+
+	setMoveTarget(-45, 45, 8000);
+	waitForDrive();
+
+	setTurnTarget(-25, 10000);
+	waitForDrive();
+
+	setMoveTarget(-30,0, 6000);
+	pros::delay(500);
+	zeroDriveEncoder();
+
+	minVoltSmart = 4000;
+	setMoveTarget(45, 0, 4500);
+	waitForDrive();
+	pros::delay(500);
+
+	setMoveTarget(-50,0,8000);
+	waitForDrive();
+
+	setMoveTarget(-10, 0, 4000);
+	intake_1.set_brake_mode(pros::E_MOTOR_BRAKE_HOLD);
+	intake_2.set_brake_mode(pros::E_MOTOR_BRAKE_HOLD);
+	pros::delay(200);
+
+	setMoveTarget(1, 0, 6000);
+	waitForDrive();
+
+	setPivotTarget(36, 12000,false);
+	waitForDrive();
+	//centerCube();
+
+	moveTilt(tiltHalf, 12000);
+	intake_1.set_brake_mode(pros::E_MOTOR_BRAKE_COAST);
+	intake_2.set_brake_mode(pros::E_MOTOR_BRAKE_COAST);			
+	moveTilt(5900,5000);
+	setIntake(-12000);
+
+	setMoveTarget(-12, 0, 8000);
+	waitForDrive();	
 }
 /**
  * Runs the user autonomous code. This function will be started in its own task
@@ -661,30 +793,16 @@ void LCDAuto(void*x){
  * from where it left off.
  */
 void autonomous() {
-	pros::Task autoTime(countTime, NULL, "Count Milliseconds");
+	//pros::Task autoTime(countTime, NULL, "Count Milliseconds");
 	pros::Task autoMove(moveSmartAuto, NULL, "Drive Task Autonmous");
 	pros::Task autoLCD(LCDAuto, NULL, "LCD Task");
 
-	driveState = Waiting;
-	left = !colorRed;
-	setBrakeBrake();
-	zeroArm();
+	//blueShortSix();
+	//redShortSix();
 
+	//blueShortNine();
+	redShortNine();
 
-
-
-	//short autonomous
-	deploy();//unfolds robot WORKS
-	setIntake(12000);//Turns on Intake WORKS
-	setArm(-1000);// Powers Arm WORKS
-
-	pros::delay(200);
-	minVoltSmart = 4000;
-	setMoveTarget(33, 0, 4500);//Drives Robot Forward WORKS
-	waitForDrive();
-
-	zeroArm();
-	moveArm(300, 12000);//moves arm up - DOESN'T WORK
 
 	pros::lcd::set_text(3, "complete!");//prints complete - WORKS
 
@@ -761,7 +879,7 @@ void diaganosticControl(void*x){
 		pros::lcd::print( 3, "Inches: %f", degreesToInches(abs(getLeftEncoder() - getRightEncoder())));;
 		pros::lcd::print( 4, "Heading: %i", getHeading());
 		pros::lcd::print( 5, "Time: %i", iTimeCount);
-		pros::lcd::print( 7, "Light Sensor: %i", LineSensor.get_value_calibrated());
+		pros::lcd::print( 7, "difference: %i", LineSensor.get_value_calibrated());
 
 	}
 }
